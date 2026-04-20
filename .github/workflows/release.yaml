@@ -54,6 +54,6 @@ jobs:
         with:
           context: .
           push: true
-          tags: yourusername/runlike:latest
+          tags: wuyangdaily/runlike:latest
           build-args: |
             VERSION=${{ steps.get_version.outputs.version }}
