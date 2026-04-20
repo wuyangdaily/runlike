@@ -1,10 +1,12 @@
-#!/bin/bash -eu
+#!/bin/bash
+set -e
+FIXTURES=("runlike_fixture1" "runlike_fixture2")
 
-
-function sudocker() {
-    sudo docker "$@"
-}
-
-for i in {1..6}; do
-    sudocker container inspect runlike_fixture$i;
+for f in "${FIXTURES[@]}"; do
+  if docker ps -a -q -f name="$f" >/dev/null; then
+    echo "Inspecting container $f"
+    docker inspect "$f"
+  else
+    echo "Container $f does not exist, skipping"
+  fi
 done
