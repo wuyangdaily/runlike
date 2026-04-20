@@ -8,7 +8,6 @@ on:
 jobs:
   release:
     runs-on: ubuntu-latest
-    # 避免重复 release
     if: "!contains(github.event.head_commit.message, 'chore(release):')"
     permissions:
       contents: write
@@ -24,19 +23,20 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.8'
-          architecture: 'x64'
 
-      # ----------------- Poetry install -----------------
-      - name: Install Poetry and dependencies
-        run: |
-          pip install poetry
-          poetry install
+      # ----------------- Install Poetry -----------------
+      - name: Install Poetry
+        run: pip install poetry
 
-      # ----------------- Get version -----------------
+      # ----------------- Get Version -----------------
       - name: Get Version
         id: get_version
         run: |
           VERSION=$(poetry run ./current_version.py)
+          # 限制最大版本为 PyPI 最新版本 1.5.4
+          if [[ "$VERSION" > "1.5.4" ]]; then
+            VERSION="1.5.4"
+          fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       # ----------------- Check if tag exists -----------------
@@ -45,10 +45,8 @@ jobs:
         run: |
           VERSION=${{ steps.get_version.outputs.version }}
           if git tag -l | grep -q "v$VERSION"; then
-            echo "Tag v$VERSION already exists, skipping tag creation"
             echo "tag_exists=true" >> $GITHUB_OUTPUT
           else
-            echo "Tag v$VERSION does not exist, will create it"
             echo "tag_exists=false" >> $GITHUB_OUTPUT
           fi
 
@@ -84,6 +82,6 @@ jobs:
         with:
           context: .
           push: true
-          tags: yourusername/yourimage:latest
-          build-args: |
-            VERSION=${{ steps.get_version.outputs.version }}
+          tags: |
+            yourusername/yourimage:latest
+            yourusername/yourimage:${{ steps.get_version.outputs.version }}
