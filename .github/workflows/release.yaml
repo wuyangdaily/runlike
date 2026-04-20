@@ -8,33 +8,32 @@ on:
 jobs:
   release:
     runs-on: ubuntu-latest
-    # Only run this job if we're not already creating a release
     if: "!contains(github.event.head_commit.message, 'chore(release):')"
     permissions:
-      contents: write  # Needed for creating tags and releases
-    
+      contents: write
+
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}  # Using built-in token with explicitly granted permissions
-          
+          token: ${{ secrets.GITHUB_TOKEN }}
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.8'
           architecture: 'x64'
-          
+
       - name: Install Poetry and dependencies
         run: |
           pip install poetry
           poetry install
-          
+
       - name: Get Version
         id: get_version
         run: |
           VERSION=$(poetry run ./current_version.py)
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          
+
       - name: Check if tag exists
         id: check_tag
         run: |
@@ -46,13 +45,13 @@ jobs:
             echo "Tag v$VERSION does not exist, will create it"
             echo "tag_exists=false" >> $GITHUB_OUTPUT
           fi
-          
+
       - name: Create Tag
         if: steps.check_tag.outputs.tag_exists != 'true'
         run: |
           git tag v${{ steps.get_version.outputs.version }}
           git push origin v${{ steps.get_version.outputs.version }}
-          
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
@@ -63,3 +62,17 @@ jobs:
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            yourusername/yourimage:latest
