@@ -8,32 +8,38 @@ on:
 jobs:
   release:
     runs-on: ubuntu-latest
+    # 避免重复 release
     if: "!contains(github.event.head_commit.message, 'chore(release):')"
     permissions:
       contents: write
 
     steps:
+      # ----------------- Checkout -----------------
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      # ----------------- Setup Python -----------------
       - uses: actions/setup-python@v5
         with:
           python-version: '3.8'
           architecture: 'x64'
 
+      # ----------------- Poetry install -----------------
       - name: Install Poetry and dependencies
         run: |
           pip install poetry
           poetry install
 
+      # ----------------- Get version -----------------
       - name: Get Version
         id: get_version
         run: |
           VERSION=$(poetry run ./current_version.py)
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
+      # ----------------- Check if tag exists -----------------
       - name: Check if tag exists
         id: check_tag
         run: |
@@ -46,12 +52,14 @@ jobs:
             echo "tag_exists=false" >> $GITHUB_OUTPUT
           fi
 
+      # ----------------- Create tag -----------------
       - name: Create Tag
         if: steps.check_tag.outputs.tag_exists != 'true'
         run: |
           git tag v${{ steps.get_version.outputs.version }}
           git push origin v${{ steps.get_version.outputs.version }}
 
+      # ----------------- Create Release -----------------
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
@@ -63,16 +71,19 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # ----------------- Docker Login -----------------
       - name: Log in to Docker Hub
         uses: docker/login-action@v2
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
+      # ----------------- Build & Push Docker -----------------
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
-          tags: |
-            yourusername/yourimage:latest
+          tags: yourusername/yourimage:latest
+          build-args: |
+            VERSION=${{ steps.get_version.outputs.version }}
