@@ -1,276 +1,85 @@
-# The only workflow that publishes. A release is a merged pull request that
-# adds release-notes/vX.Y.Z.md (see RELEASING.md): merging it is the
-# maintainer's approval. On every push to master this workflow looks for the
-# one notes file in the pushed commit whose tag does not exist yet. If there
-# is one, it runs the full CI on that pushed master commit, tags it, and
-# publishes the GitHub release (those notes, binaries, SHA256SUMS; the macOS
-# binary signed and notarized by Apple first, job build) and the
-# image assaflavie/runlike:X.Y.Z (+ :latest for the newest non-prerelease),
-# the .deb packages (also in the release), and, for the newest
-# non-prerelease, the formula in lavie/homebrew-tap and the signed APT
-# repository lavie/apt (https://lavie.github.io/apt).
-# A version whose release failed stays pending: the next push to master
-# releases it on that newer commit.
-#
-# Run it by hand (Actions > release > Run workflow, on master) with a
-# version: without "republish" it releases that pending version on the
-# current master head (its tag must not exist); with "republish" it publishes
-# the existing tag again from the tagged commit. The secrets (DOCKERHUB_TOKEN,
-# HOMEBREW_TAP_TOKEN, APT_REPO_TOKEN, APT_GPG_PRIVATE_KEY, APT_GPG_PASSPHRASE,
-# the Apple signing and notarization secrets) live only in the environment
-# "release", which deploys from master only.
-# Never publishes to PyPI.
-name: release
+name: Create Release
+
 on:
-  push:
-    branches: [master]
   workflow_dispatch:
-    inputs:
-      version:
-        description: "Version to release, without v (e.g. 2.0.0)"
-        required: true
-        type: string
-      republish:
-        description: "Publish the existing tag again (from the tagged commit)"
-        type: boolean
-        default: false
-permissions:
-  contents: read
-concurrency:
-  group: release
-  cancel-in-progress: false
-defaults:
-  run:
-    shell: bash # -eo pipefail
-env:
-  GO_VERSION: "1.27.3"
-  IMAGE: assaflavie/runlike
 
 jobs:
-  plan:
-    if: github.ref == 'refs/heads/master'
-    runs-on: ubuntu-24.04
-    outputs:
-      tag: ${{ steps.check.outputs.tag }}
-      version: ${{ steps.check.outputs.version }}
-      notes: ${{ steps.check.outputs.notes }}
-      commit: ${{ steps.check.outputs.commit }}
-      prerelease: ${{ steps.check.outputs.prerelease }}
-      latest: ${{ steps.check.outputs.latest }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0 # all tags, and origin/master's history
-          persist-credentials: false
-      - id: check
-        env:
-          VERSION: ${{ inputs.version }}
-          REPUBLISH: ${{ inputs.republish }}
-        run: |
-          if [ "$REPUBLISH" = true ]; then
-            scripts/release-check.py --republish "$VERSION" | tee -a "$GITHUB_OUTPUT"
-          elif [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
-            scripts/release-check.py --commit "$GITHUB_SHA" --version "$VERSION" | tee -a "$GITHUB_OUTPUT"
-          else
-            scripts/release-check.py --commit "$GITHUB_SHA" | tee -a "$GITHUB_OUTPUT"
-          fi
-
-  test:
-    needs: plan
-    if: needs.plan.outputs.tag != ''
-    uses: ./.github/workflows/ci.yml
-    with:
-      ref: ${{ needs.plan.outputs.commit }}
-
-  # Builds every binary once, on macOS, and signs and notarizes
-  # runlike-darwin-arm64 (scripts/macos-sign.sh) before anything is tagged
-  # or published: if this fails, publish never runs. publish uploads exactly
-  # these files.
-  build:
-    needs: [plan, test]
-    runs-on: macos-15
-    environment: release
-    outputs:
-      darwin_sha256: ${{ steps.sums.outputs.darwin }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.plan.outputs.commit }}
-          persist-credentials: false
-      # The signing script comes from the workflow's own commit, so a
-      # republish of a tag older than the script signs too.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          path: .signing
-          sparse-checkout: |
-            scripts/macos-sign.sh
-            scripts/DeveloperIDG2CA.pem
-          sparse-checkout-cone-mode: false
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: false # build what we publish from a clean module cache
-      - env:
-          TAG: ${{ needs.plan.outputs.tag }}
-        run: make cross VERSION="$TAG"
-      - env:
-          MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
-          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
-          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
-          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
-          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
-        run: .signing/scripts/macos-sign.sh dist/runlike-darwin-arm64
-      # The signature changes the darwin file: write SHA256SUMS again.
-      - id: sums
-        run: |
-          cd dist && shasum -a 256 runlike-* > SHA256SUMS
-          echo "darwin=$(awk '$2 == "runlike-darwin-arm64" {print $1}' SHA256SUMS)" >> "$GITHUB_OUTPUT"
-      # Not "dist": ci.yml (the test job, same run) uploads unsigned
-      # binaries under that name.
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: release-dist
-          path: dist/
-          if-no-files-found: error
-          retention-days: 1
-
-  publish:
-    needs: [plan, test, build]
-    runs-on: ubuntu-24.04
-    environment: release
+  release:
+    runs-on: ubuntu-latest
     permissions:
-      contents: write # the tag and the GitHub release
-    env:
-      TAG: ${{ needs.plan.outputs.tag }}
-      VERSION: ${{ needs.plan.outputs.version }}
-      NOTES: ${{ needs.plan.outputs.notes }}
-      COMMIT: ${{ needs.plan.outputs.commit }}
-      PRERELEASE: ${{ needs.plan.outputs.prerelease }}
-      LATEST: ${{ needs.plan.outputs.latest }}
+      contents: write
+      packages: write
+
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.plan.outputs.commit }}
           fetch-depth: 0
-      # Log in to Docker Hub before anything irreversible (tag, GitHub
-      # release): a missing or expired DOCKERHUB_TOKEN must stop the
-      # release here, not after the tag is public.
-      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
-        with:
-          username: assaflavie
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      # The Homebrew tap, checked out early for the same reason: a bad
-      # HOMEBREW_TAP_TOKEN stops the release before the tag. Only the
-      # newest non-prerelease moves the tap.
-      - if: env.LATEST == 'true'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: lavie/homebrew-tap
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          path: .tap
-      # The APT repository, for the same reason and the same versions.
-      - if: env.LATEST == 'true'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: lavie/apt
-          token: ${{ secrets.APT_REPO_TOKEN }}
-          path: .apt
-      # The formula and package scripts come from the workflow's own commit,
-      # so a republish of a tag older than the scripts updates them too.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          path: .tools
-          sparse-checkout: |
-            scripts/homebrew-formula.sh
-            scripts/deb.sh
-            scripts/apt-repo.sh
-            LICENSE.txt
-          sparse-checkout-cone-mode: false
-          persist-credentials: false
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: release-dist
-          path: dist
-      # Publish only the files build signed: the darwin binary must be the
-      # one build reported after signing.
-      - env:
-          DARWIN_SHA256: ${{ needs.build.outputs.darwin_sha256 }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get Version from Upstream
+        id: get_version
         run: |
-          cd dist && shasum -a 256 -c SHA256SUMS
-          test -n "$DARWIN_SHA256"
-          test "$(awk '$2 == "runlike-darwin-arm64" {print $1}' SHA256SUMS)" = "$DARWIN_SHA256" \
-            || { echo "runlike-darwin-arm64 is not the signed binary from build"; exit 1; }
-      # The .debs, from those same Linux binaries; dated by the release
-      # commit, so a republish builds the same bytes. deb.sh adds them to
-      # SHA256SUMS.
-      - name: .deb packages
-        run: |
-          SOURCE_DATE_EPOCH=$(git log -1 --format=%ct "$COMMIT") .tools/scripts/deb.sh "$VERSION" dist
-      # Sign the APT repository before the tag, so a bad key or passphrase
-      # stops the release here; it is pushed after the image. apt-repo.sh
-      # refuses a key other than the one the repository already publishes.
-      - name: APT repository
-        if: env.LATEST == 'true'
-        env:
-          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
-          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
-        run: |
-          command -v apt-ftparchive >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q apt-utils; }
-          export GNUPGHOME="$RUNNER_TEMP/gnupg"
-          install -d -m 700 "$GNUPGHOME"
-          gpg --batch --import <<<"$APT_GPG_PRIVATE_KEY"
-          .tools/scripts/apt-repo.sh .apt dist/runlike_*.deb
-          gpg --batch --verify .apt/dists/stable/InRelease
-          rm -rf "$GNUPGHOME"
-          cd .apt
-          git add -A
-          git diff --cached --quiet || git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-            commit -qm "runlike $VERSION"
-      - name: Tag the release commit
-        run: |
-          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
-            test "$(git rev-list -n1 "$TAG")" = "$COMMIT" || { echo "$TAG is not on $COMMIT"; exit 1; }
-          else
-            git tag "$TAG" "$COMMIT"
-            git push origin "refs/tags/$TAG"
+          VERSION=$(git ls-remote --tags --refs https://github.com/lavie/runlike.git \
+            | awk -F'/' '{print $NF}' \
+            | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sed 's/^v//' \
+            | sort -V \
+            | tail -n 1)
+          
+          if [ -z "$VERSION" ]; then
+            echo "::error::无法获取上游版本号。"
+            exit 1
           fi
-      - name: GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
+          
+          echo "Resolved upstream version: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Check if tag exists
+        id: check_tag
         run: |
-          pre=(); [ "$PRERELEASE" = true ] && pre=(--prerelease)
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" --draft=false --title "$TAG" --notes-file "$NOTES" --latest="$LATEST" "${pre[@]}"
-            gh release upload "$TAG" --clobber dist/*
+          VERSION=${{ steps.get_version.outputs.version }}
+          if git tag -l | grep -q "v$VERSION"; then
+            echo "tag_exists=true" >> $GITHUB_OUTPUT
           else
-            gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$NOTES" --latest="$LATEST" "${pre[@]}" dist/*
+            echo "tag_exists=false" >> $GITHUB_OUTPUT
           fi
-      - name: Image tags
+
+      - name: Create Tag
+        if: steps.check_tag.outputs.tag_exists != 'true'
         run: |
-          tags="$IMAGE:$VERSION"
-          if [ "$LATEST" = true ]; then tags="$tags,$IMAGE:latest"; fi
-          echo "TAGS=$tags" >> "$GITHUB_ENV"
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+          git tag v${{ steps.get_version.outputs.version }}
+          git push origin v${{ steps.get_version.outputs.version }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and push multi-platform Docker images
+        uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
-          build-args: VERSION=${{ env.TAG }}
-          tags: ${{ env.TAGS }}
+          platforms: linux/amd64,linux/arm64,linux/arm/v6,linux/arm/v7
           push: true
-      - name: Homebrew tap
-        if: env.LATEST == 'true'
-        run: |
-          mkdir -p .tap/Formula
-          .tools/scripts/homebrew-formula.sh "$VERSION" dist/SHA256SUMS > .tap/Formula/runlike.rb
-          cd .tap
-          git add Formula/runlike.rb
-          if git diff --cached --quiet; then echo "tap already has $TAG"; exit 0; fi
-          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-            commit -qm "runlike $VERSION"
-          git push origin HEAD
-      - name: APT repository push
-        if: env.LATEST == 'true'
-        run: git -C .apt push origin HEAD
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/runlike:latest
+            ${{ secrets.DOCKER_USERNAME }}/runlike:v${{ steps.get_version.outputs.version }}
+          build-args: |
+            VERSION=v${{ steps.get_version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.get_version.outputs.version }}
+          name: Release v${{ steps.get_version.outputs.version }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
